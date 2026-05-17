@@ -15,6 +15,17 @@ class Settings(BaseSettings):
     git_user_name: str = "agentic-oss-contributor"
     git_user_email: str = "bot@agentic-oss-contributor.local"
 
+    # GitHub OAuth (web application flow). Required for the console's
+    # "Sign in with GitHub" button. Register an OAuth App at
+    # https://github.com/settings/applications/new and put the client
+    # id / secret in .env. Callback URL on GitHub must match
+    # {backend_url}/api/auth/github/callback.
+    github_oauth_client_id: Optional[str] = None
+    github_oauth_client_secret: Optional[str] = None
+    github_oauth_scope: str = "repo read:user"
+    frontend_url: str = "http://localhost:5173"
+    backend_url: str = "http://localhost:8000"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
