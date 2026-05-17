@@ -4,3 +4,8 @@ __pycache__/
 .env
 .workspace/
 .DS_Store
+
+# console (Vite + React) build & deps
+console/node_modules/
+console/dist/
+console/*.local

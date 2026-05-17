@@ -1,145 +1,162 @@
 # agentic-oss-contributor
 
-A FastAPI service that does two specific things to your open GitHub pull
-requests using the Claude API:
+Monorepo for the agentic OSS-contributor toolkit:
 
-1. **Summarize PR review comments.** Fetches every issue comment, review
-   comment, and review on a PR, sends them to Claude, and returns a
-   structured summary: a prose recap, a list of concrete action items, and
-   a list of blocking concerns.
-2. **Resolve merge conflicts.** Clones the repo, merges the PR's base
-   branch into its head, asks Claude to rewrite each conflicted file, and
-   either pushes the resolution back to the PR branch or posts the
-   proposed diff as a PR comment — based on a confidence threshold.
+- **Backend** (this repo root) — a stateless FastAPI service that uses the
+  Claude API to (a) summarize PR review threads and (b) auto-resolve merge
+  conflicts on PRs you author.
+- **[`console/`](console/)** — a React + Vite dashboard that signs into
+  GitHub via OAuth, lists your PRs &amp; issues from the
+  [das-github-mirror](https://mirror.gittensor.io), and drives the backend's
+  per-PR actions with an `auto-push | manual review` toggle.
 
-It is the **backend agent**. A separate UI,
-[agentic-oss-contributor-console](https://github.com/plind-junior/agentic-oss-contributor-console),
-calls it. You can also call it directly with `curl` / cron.
+The two run as separate processes locally but share one repo so they can
+evolve together.
 
-The service is stateless. Each request carries credentials in
-`X-GitHub-Token` and `X-Anthropic-Key` headers (the console injects these).
-A `.env` fallback exists for headless use.
+## Quick start
 
-## What each endpoint actually does
+Two terminals.
 
-### `GET /api/me`
-Calls `GET /user` on GitHub to verify the token, then echoes the login,
-the Claude model in effect, and the confidence threshold in effect.
-Returns 401 if the GitHub token is bad.
-
-### `GET /api/prs`
-Returns every open PR authored by the authenticated user, across all repos
-they have access to. Uses GitHub's search API
-(`is:pr is:open author:@me`). Each entry includes title, repo, number,
-URL, mergeable state, and review-decision.
-
-### `POST /api/prs/{owner}/{repo}/{number}/summary`
-1. Fetches the PR, all issue comments, all review comments, and all
-   reviews via PyGithub.
-2. Sends title + body + flattened comment thread to Claude with a system
-   prompt asking for `{ summary, action_items[], blocking_concerns[] }`.
-3. Prompt caching is enabled so re-runs against the same PR are cheap.
-4. Returns the structured result. **It does not post anything back to
-   GitHub** — this endpoint is read-only.
-
-### `POST /api/prs/{owner}/{repo}/{number}/resolve`
-The only endpoint that writes to GitHub. Step by step:
-
-1. **Reject forks.** PRs from forks are rejected with 400 — pushing to a
-   fork's head branch would need the fork owner's token.
-2. **Clone or reuse** the repo under `WORKSPACE_DIR/{owner}__{repo}`
-   (default `./workspace`). Uses the supplied `X-GitHub-Token` for auth.
-3. **Hard-reset** the local checkout to `origin/<head_branch>`.
-4. **Attempt the merge:** `git merge origin/<base_branch> --no-ff --no-commit`.
-   If it merges cleanly with no conflicts, returns a no-op response.
-5. **For each conflicted file**, sends the file contents (with conflict
-   markers intact) to Claude. Claude returns
-   `{ resolved_content, confidence: 0..1, reasoning }`. Files where
-   conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) survive in the
-   model's output get their confidence clamped to ≤ 0.2.
-6. **Decide:** compute average confidence across files.
-   - **If average ≥ threshold** (default 0.85): write the resolved
-     content, `git add`, commit with a message describing the merge, and
-     `git push` to the PR head branch. **No `--force`** — fast-forward
-     only. PR is updated; reviewers see new commits.
-   - **If average < threshold**: `git merge --abort`, then post a comment
-     on the PR containing a per-file confidence table and the proposed
-     unified diff inside a collapsed `<details>` block. The PR is **not**
-     modified.
-
-The response body tells you which branch it took, the per-file
-confidences, and either the pushed commit SHA or the posted comment URL.
-
-## Auth
-
-Every endpoint requires both a GitHub token and an Anthropic API key.
-
-| Header | `.env` fallback | Notes |
-| --- | --- | --- |
-| `X-GitHub-Token` | `GITHUB_TOKEN` | Needs `repo` scope to push and comment |
-| `X-Anthropic-Key` | `ANTHROPIC_API_KEY` | |
-| `X-Claude-Model` (optional) | `CLAUDE_MODEL` | Default `claude-opus-4-7` |
-| `X-Confidence-Threshold` (optional, 0..1) | `CONFIDENCE_THRESHOLD` | Default `0.85` |
-
-Headers win when both are present.
-
-## Run
+**Backend** (FastAPI on `:8000`):
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # only needed for headless / cron use
+cp .env.example .env       # then fill in GITHUB_OAUTH_CLIENT_ID/SECRET
 uvicorn app.main:app --reload --port 8000
 ```
 
-> **Python version.** `pydantic-core` does not currently ship wheels for
-> Python 3.14. Use 3.12 (or 3.10–3.13).
+> Python 3.12 — `pydantic-core` doesn't ship wheels for 3.14 yet.
 
-CORS is preconfigured for `http://localhost:5173` so the console can call
-it during local development.
+**Console** (Vite on `:5173`):
+
+```bash
+cd console
+npm install
+npm run dev
+```
+
+Vite proxies `/api/*` to `127.0.0.1:8000`, so start the backend first.
+Open <http://localhost:5173> and click **Continue with GitHub**.
+
+### One-time GitHub OAuth setup
+
+The console's sign-in button calls `/api/auth/github/login`, which 302s to
+GitHub. For that to work the backend needs OAuth credentials:
+
+1. Register an OAuth App at <https://github.com/settings/applications/new>
+   - Homepage URL: `http://localhost:5173`
+   - Authorization callback URL: `http://localhost:8000/api/auth/github/callback`
+2. Put the client id / secret in `.env`:
+   ```
+   GITHUB_OAUTH_CLIENT_ID=Iv1.xxxxxxxx
+   GITHUB_OAUTH_CLIENT_SECRET=xxxxxxxxxxxxxxxx
+   ```
+3. Restart the backend.
+
+The Anthropic API key is optional and is set per-browser in the console's
+**Settings** page (sent per-request as `X-Anthropic-Key`). Without it, AI
+features (comment summary, conflict resolution) are disabled but you can
+still browse PRs &amp; issues from the mirror.
+
+## Backend API reference
+
+The backend is stateless. Each request carries credentials in
+`X-GitHub-Token` and `X-Anthropic-Key` headers (the console injects these
+automatically after OAuth sign-in). A `.env` fallback exists for headless /
+cron use.
+
+### `GET /api/auth/github/login`
+302 to GitHub's OAuth authorize URL. Used by the console's sign-in button.
+
+### `GET /api/auth/github/callback`
+Exchanges the OAuth code for an access token, then 302s the browser to
+`{FRONTEND_URL}/auth/callback#access_token=…`. The console reads the
+fragment and stores the token in `localStorage`.
+
+### `GET /api/me`
+Calls `GET /user` on GitHub to verify the token; echoes login, Claude
+model, confidence threshold. 401 if the token is bad.
+
+### `GET /api/prs`
+Open PRs authored by the authenticated user (`is:pr is:open author:@me`).
+*Note:* the console currently sources its lists from das-github-mirror
+instead; this route stays available for headless use.
+
+### `POST /api/prs/{owner}/{repo}/{number}/summary`
+Fetches the PR, all issue and review comments, sends them to Claude with
+prompt caching, returns `{ summary, action_items[], blocking_concerns[] }`.
+Read-only — does not post anything back to GitHub.
+
+### `POST /api/prs/{owner}/{repo}/{number}/resolve?push={true|false}`
+The only endpoint that writes to GitHub.
+
+1. Rejects PRs from forks (400).
+2. Clones / hard-resets the repo into `WORKSPACE_DIR/{owner}__{repo}`.
+3. `git merge origin/<base> --no-ff --no-commit`. Clean merge → no-op
+   response.
+4. For each conflicted file, sends contents (with markers intact) to
+   Claude; receives `{ resolved_content, confidence, reasoning }`.
+   Confidence is clamped to ≤ 0.2 if conflict markers survive.
+5. Decides:
+   - `push=true` (default) **and** avg confidence ≥ threshold: write,
+     `git add`, commit, fast-forward push.
+   - `push=false` **or** avg confidence below threshold: `git merge --abort`,
+     post a PR comment with a per-file confidence table and the diff in a
+     collapsed `<details>` block.
+
+Response body includes the per-file confidences and either the pushed
+commit SHA or the posted comment URL.
+
+## Auth
+
+| Header | `.env` fallback | Notes |
+| --- | --- | --- |
+| `X-GitHub-Token` | `GITHUB_TOKEN` | Needs `repo` scope to push & comment |
+| `X-Anthropic-Key` | `ANTHROPIC_API_KEY` | Optional — only required for AI endpoints |
+| `X-Claude-Model` (optional) | `CLAUDE_MODEL` | Default `claude-opus-4-7` |
+| `X-Confidence-Threshold` (0..1, optional) | `CONFIDENCE_THRESHOLD` | Default `0.85` |
+
+Headers win when both are present. The console acquires the GitHub token
+via OAuth (so users never paste a PAT).
 
 ## Deploy (free tier — Render)
 
-A [`render.yaml`](render.yaml) is included. The service runs on Render's
+A [`render.yaml`](render.yaml) is included for the **backend**. Render's
 free Python web service: 512 MB RAM, sleeps after 15 min idle (~30 s cold
 start), ephemeral disk (the `workspace/` clone is rebuilt on first
 `/resolve` after a restart). No credit card required.
 
-Steps:
+1. Push this repo to GitHub.
+2. <https://render.com> → **New + → Blueprint**, point it at this repo.
+3. After deploy, set `GITHUB_OAUTH_CLIENT_ID` &amp; `GITHUB_OAUTH_CLIENT_SECRET`
+   in the Render dashboard, plus `FRONTEND_URL=https://your-console.example`
+   and `BACKEND_URL=https://your-backend.onrender.com`.
+4. Update the OAuth App's callback URL on GitHub to match the Render URL.
 
-1. Push this repo to GitHub (already done if you used `git push`).
-2. Sign in at <https://render.com> with your GitHub account.
-3. **New + → Blueprint**, point it at this repo. Render reads
-   `render.yaml` and creates the service automatically.
-4. Wait for the first build to finish (~2 min). The service comes up at
-   `https://agentic-oss-contributor.onrender.com` (the exact subdomain is
-   shown on the dashboard).
-5. Verify: `curl -H "X-GitHub-Token: ghp_..." -H "X-Anthropic-Key: sk-ant-..." \
-   https://<your-subdomain>.onrender.com/api/me` should return your login.
-
-**No env vars to set on the server** — credentials are passed per-request
-in `X-GitHub-Token` and `X-Anthropic-Key` headers, exactly as the local
-console already does. Point the console's "agent URL" setting at the
-Render URL and it works the same as local.
-
-**Cold-start note.** The first request after 15 min idle takes ~30 s to
-wake up. Subsequent requests are fast.
-
-**Disk note.** `WORKSPACE_DIR` is set to `/tmp/workspace` so clones land
-on Render's writable tmp directory. They survive within an instance's
-lifetime, not across redeploys or sleep cycles.
+The **console** deploys as any Vite static site (Netlify, Vercel, Render
+static, GitHub Pages). Set `VITE_API_BASE_URL` if it should hit a
+non-same-origin backend.
 
 ## Layout
 
 ```
-app/
-  config.py            # pydantic-settings, .env (optional fallback)
-  deps.py              # Credentials dependency from headers
-  schemas.py           # response models
-  github_client.py     # PyGithub wrappers (token threaded per-call)
-  claude_client.py     # Anthropic SDK + prompt caching
-  conflict_resolver.py # GitPython clone/merge/resolve/push
-  main.py              # FastAPI routes
-requirements.txt
-.env.example
+.
+├── app/                    # FastAPI backend
+│   ├── main.py             # routes (incl. OAuth login/callback)
+│   ├── deps.py             # X-* header → Credentials dependency
+│   ├── config.py           # pydantic-settings, .env loading
+│   ├── github_client.py    # PyGithub wrappers
+│   ├── claude_client.py    # Anthropic SDK + prompt caching
+│   ├── conflict_resolver.py# GitPython clone/merge/resolve/push
+│   └── schemas.py
+├── console/                # React + Vite + MUI dashboard
+│   ├── src/api/            # axios + TanStack Query, GitHub + Mirror clients
+│   ├── src/components/     # layout/, prs/, issues/, ConnectGitHub gate
+│   ├── src/pages/          # DashboardPage, SettingsPage, AuthCallbackPage
+│   ├── src/credentials.ts  # localStorage store + headers builder
+│   └── src/theme.ts        # MUI dark theme, JetBrains Mono
+├── requirements.txt
+├── render.yaml
+└── .env.example
 ```
