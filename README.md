@@ -1,6 +1,6 @@
 # agentic-oss-contributor
 
-A Claude-powered agent that summarizes review threads and auto-resolves
+A Claude-powered agent that triages PRs and auto-resolves
 merge conflicts on the GitHub pull requests you author — with a React
 dashboard to drive it.
 
